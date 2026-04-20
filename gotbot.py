@@ -6,15 +6,24 @@ import time
 
 # --- Автоматическая установка зависимостей ---
 def ensure_dependencies():
-    try:
-        import docker
-        import rich
-    except ImportError:
-        print("Установка необходимых библиотек (docker, rich)...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "docker", "rich"])
-        os.execv(sys.executable, [sys.executable] + sys.argv)
-
-ensure_dependencies()
+    import subprocess
+    import sys
+    import os
+    
+    venv_path = os.path.expanduser("~/.vpn_admin_venv")
+    pip_bin = os.path.join(venv_path, "bin", "pip")
+    python_bin = os.path.join(venv_path, "bin", "python")
+    
+    # Проверка, работаем ли мы уже в виртуальном окружении
+    if sys.prefix != venv_path:
+        if not os.path.exists(venv_path):
+            print("Создание виртуального окружения для CLI...")
+            subprocess.check_call([sys.executable, "-m", "venv", venv_path])
+            print("Установка зависимостей...")
+            subprocess.check_call([pip_bin, "install", "docker", "rich"])
+        
+        # Перезапуск скрипта внутри виртуального окружения
+        os.execv(python_bin, [python_bin] + sys.argv)
 
 from rich.console import Console
 from rich.table import Table
