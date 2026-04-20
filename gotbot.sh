@@ -1,118 +1,187 @@
 #!/bin/bash
 
-# ========= CONFIG =========
 EDITOR=${EDITOR:-nano}
+TMP_DIR="/tmp/remna-cli"
+mkdir -p $TMP_DIR
 
-# ========= COLORS =========
+# COLORS
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-# ========= FUNCTIONS =========
+# GLOBAL ARRAYS
+XRAY_CONTAINERS=()
+PANEL_CONTAINERS=()
 
-detect_containers() {
-    XRAY=$(docker ps -a --format "{{.Names}}" | grep -Ei 'xray|remnanode|node' | head -n1)
-    PANEL=$(docker ps -a --format "{{.Names}}" | grep -Ei 'remnawave|panel' | head -n1)
-    DB=$(docker ps -a --format "{{.Names}}" | grep -Ei 'postgres|db' | head -n1)
+# ========= DETECT =========
+detect_all() {
+    XRAY_CONTAINERS=($(docker ps -a --format "{{.Names}}" | grep -Ei 'xray|remnanode|node'))
+    PANEL_CONTAINERS=($(docker ps -a --format "{{.Names}}" | grep -Ei 'remnawave|panel'))
 }
 
+# ========= STATUS =========
 status() {
-    echo -e "${YELLOW}=== CONTAINERS STATUS ===${NC}"
+    clear
+    echo -e "${YELLOW}=== CONTAINERS ===${NC}"
     docker ps -a
+    read -p "Enter to continue..."
 }
 
-logs_menu() {
-    echo "1) Xray logs"
-    echo "2) Panel logs"
-    echo "3) All logs"
-    read -p "Select: " opt
+# ========= LOG STREAM =========
+logs_live() {
+    detect_all
 
-    case $opt in
-        1) docker logs -f $XRAY ;;
-        2) docker logs -f $PANEL ;;
-        3) docker logs -f $XRAY & docker logs -f $PANEL ;;
-    esac
+    CHOICE=$(printf "%s\n" "${XRAY_CONTAINERS[@]}" "${PANEL_CONTAINERS[@]}" | \
+    dialog --menu "Select container logs" 20 60 10 2>&1 >/dev/tty)
+
+    clear
+    docker logs -f $CHOICE
 }
 
+# ========= SEARCH =========
 search_logs() {
-    read -p "Enter IP or UUID: " query
-    echo -e "${GREEN}Searching logs...${NC}"
+    read -p "Enter IP / UUID: " q
 
-    docker logs $XRAY 2>&1 | grep -i "$query"
-    docker logs $PANEL 2>&1 | grep -i "$query"
+    echo -e "${GREEN}Searching...${NC}"
+
+    for c in "${XRAY_CONTAINERS[@]}"; do
+        docker logs $c 2>&1 | grep -i "$q"
+    done
+
+    for c in "${PANEL_CONTAINERS[@]}"; do
+        docker logs $c 2>&1 | grep -i "$q"
+    done
 }
 
-container_control() {
-    echo "1) Start"
-    echo "2) Stop"
-    echo "3) Restart"
-    read -p "Action: " act
+# ========= PARSE XRAY =========
+parse_xray_logs() {
+    FILE="$TMP_DIR/xray.log"
+    > $FILE
 
-    read -p "Container name: " cname
+    for c in "${XRAY_CONTAINERS[@]}"; do
+        docker logs $c 2>&1 >> $FILE
+    done
 
-    case $act in
-        1) docker start $cname ;;
-        2) docker stop $cname ;;
-        3) docker restart $cname ;;
-    esac
+    echo -e "${GREEN}Parsing logs...${NC}"
+
+    cat $FILE | grep -E "tcp|udp" | awk '
+    {
+        for(i=1;i<=NF;i++){
+            if($i ~ /[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/) ip=$i
+            if($i ~ /[a-f0-9-]{36}/) uuid=$i
+        }
+        if(ip && uuid) print ip, uuid
+    }' | sort | uniq -c | sort -nr | head -20
 }
 
-edit_configs() {
-    echo -e "${YELLOW}Searching config files...${NC}"
+# ========= ABUSE DETECT =========
+abuse_detect() {
+    FILE="$TMP_DIR/xray.log"
 
-    FILE=$(find / -type f \( -name "*.json" -o -name "*.yml" \) 2>/dev/null | grep -Ei 'xray|remna|config' | head -n 10)
+    echo -e "${RED}Detecting abuse...${NC}"
 
-    echo "$FILE"
-    echo "Enter full path:"
-    read path
-
-    $EDITOR "$path"
+    cat $FILE | awk '
+    {
+        for(i=1;i<=NF;i++){
+            if($i ~ /[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/) ip=$i
+            if($i ~ /[a-f0-9-]{36}/) uuid=$i
+        }
+        if(ip && uuid) print uuid, ip
+    }' | sort | uniq | awk '
+    {
+        map[$1]++
+    }
+    END {
+        for (u in map) {
+            if (map[u] > 3) {
+                print "ABUSE:", u, "IPs:", map[u]
+            }
+        }
+    }'
 }
 
+# ========= USER TRACE =========
 user_trace() {
-    read -p "Enter UUID or IP: " user
+    read -p "Enter UUID/IP: " u
 
-    echo -e "${GREEN}=== XRAY ===${NC}"
-    docker logs $XRAY 2>&1 | grep "$user"
-
-    echo -e "${GREEN}=== PANEL ===${NC}"
-    docker logs $PANEL 2>&1 | grep "$user"
+    for c in "${XRAY_CONTAINERS[@]}"; do
+        echo -e "${GREEN}=== $c ===${NC}"
+        docker logs $c 2>&1 | grep "$u"
+    done
 }
 
-auto_info() {
-    echo -e "${GREEN}Detected:${NC}"
-    echo "Xray: $XRAY"
-    echo "Panel: $PANEL"
-    echo "DB: $DB"
+# ========= CONTAINER CONTROL =========
+container_control() {
+    NAME=$(docker ps -a --format "{{.Names}}" | \
+    dialog --menu "Select container" 20 60 10 2>&1 >/dev/tty)
+
+    ACTION=$(dialog --menu "Action" 15 50 5 \
+    1 "Start" \
+    2 "Stop" \
+    3 "Restart" 2>&1 >/dev/tty)
+
+    clear
+
+    case $ACTION in
+        1) docker start $NAME ;;
+        2) docker stop $NAME ;;
+        3) docker restart $NAME ;;
+    esac
+
+    echo "Done"
+    sleep 1
+}
+
+# ========= CONFIG FIND =========
+edit_configs() {
+    FILE=$(find / -type f \( -name "*.json" -o -name "*.yml" \) \
+    2>/dev/null | grep -Ei 'xray|remna|config' | \
+    dialog --menu "Select config" 20 70 10 2>&1 >/dev/tty)
+
+    clear
+    $EDITOR "$FILE"
+}
+
+# ========= MULTI NODE =========
+multi_node_logs() {
+    echo -e "${YELLOW}Aggregating logs...${NC}"
+
+    for c in "${XRAY_CONTAINERS[@]}"; do
+        echo "=== $c ==="
+        docker logs --tail 50 $c
+    done
 }
 
 # ========= MAIN =========
-
-detect_containers
-
 while true; do
-    echo ""
-    echo -e "${YELLOW}==== XRAY CLI TOOL ==== ${NC}"
-    echo "1) Containers status"
-    echo "2) Logs"
-    echo "3) Search in logs (IP/UUID)"
-    echo "4) User trace"
-    echo "5) Container control"
-    echo "6) Edit configs"
-    echo "7) Auto detected info"
-    echo "0) Exit"
+    detect_all
 
-    read -p "Select: " choice
+    CHOICE=$(dialog --clear --menu "REMNA CLI v2" 20 60 12 \
+    1 "Containers status" \
+    2 "Live logs" \
+    3 "Search logs (IP/UUID)" \
+    4 "User trace" \
+    5 "Parse Xray logs (top users)" \
+    6 "Detect abuse (multi-IP)" \
+    7 "Multi-node logs" \
+    8 "Container control" \
+    9 "Edit configs" \
+    0 "Exit" \
+    2>&1 >/dev/tty)
 
-    case $choice in
+    clear
+
+    case $CHOICE in
         1) status ;;
-        2) logs_menu ;;
+        2) logs_live ;;
         3) search_logs ;;
         4) user_trace ;;
-        5) container_control ;;
-        6) edit_configs ;;
-        7) auto_info ;;
-        0) exit ;;
+        5) parse_xray_logs ;;
+        6) abuse_detect ;;
+        7) multi_node_logs ;;
+        8) container_control ;;
+        9) edit_configs ;;
+        0) clear; exit ;;
     esac
 done
