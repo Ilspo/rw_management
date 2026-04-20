@@ -1,123 +1,118 @@
 #!/bin/bash
 
-# --- Конфигурация ---
-KEYWORDS="xray remnawave remnanode 3x-ui marzban vless"
-CONF_XRAY="/etc/xray/config.json"
-CONF_REMNANODE="/etc/remnanode/config.yml"
-CONF_WAVE="/opt/remnawave/docker-compose.yml"
+# ========= CONFIG =========
+EDITOR=${EDITOR:-nano}
 
-# Цвета
-GREEN='\033[0;32m'
+# ========= COLORS =========
 RED='\033[0;31m'
-CYAN='\033[0;36m'
+GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-# Проверка Docker
-if ! command -v docker &> /dev/null; then
-    echo -e "${RED}Ошибка: Docker не установлен!${NC}"
-    exit 1
-fi
+# ========= FUNCTIONS =========
 
-# Функция поиска контейнеров
-get_containers() {
-    local filter=""
-    for k in $KEYWORDS; do filter="$filter|$k"; done
-    filter=${filter:1} # убираем первый символ |
-    docker ps -a --format "{{.Names}} ({{.Status}})" | grep -Ei "$filter"
+detect_containers() {
+    XRAY=$(docker ps -a --format "{{.Names}}" | grep -Ei 'xray|remnanode|node' | head -n1)
+    PANEL=$(docker ps -a --format "{{.Names}}" | grep -Ei 'remnawave|panel' | head -n1)
+    DB=$(docker ps -a --format "{{.Names}}" | grep -Ei 'postgres|db' | head -n1)
 }
 
-# Функция поиска по логам
-global_search() {
-    echo -ne "${YELLOW}Введите IP или UUID для поиска: ${NC}"
-    read query
-    if [ -z "$query" ]; then return; fi
-    
-    echo -e "${CYAN}Поиск по всем VPN-контейнерам...${NC}"
-    local containers=$(docker ps --format "{{.Names}}" | grep -Ei "$(echo $KEYWORDS | tr ' ' '|')")
-    
-    for c in $containers; do
-        results=$(docker logs --tail 1000 "$c" 2>&1 | grep -i "$query")
-        if [ ! -z "$results" ]; then
-            echo -e "${GREEN}>>> Найдено в $c:${NC}"
-            echo "$results" | tail -n 5
-            echo "-------------------"
-        fi
-    done
-    echo -e "${YELLOW}Нажмите Enter...${NC}"
-    read
+status() {
+    echo -e "${YELLOW}=== CONTAINERS STATUS ===${NC}"
+    docker ps -a
 }
 
-# Меню управления конкретным контейнером
-manage_container() {
-    local name=$1
-    while true; do
-        clear
-        echo -e "${CYAN}=== Управление: $name ===${NC}"
-        status=$(docker inspect -f '{{.State.Status}}' "$name")
-        echo -e "Статус: ${YELLOW}$status${NC}"
-        echo "--------------------------"
-        echo "1) Логи (Live)"
-        echo "2) Перезапуск"
-        echo "3) Остановить"
-        echo "4) Запустить"
-        echo "5) Редактировать конфиг"
-        echo "0) Назад"
-        echo -ne "${GREEN}Выбор: ${NC}"
-        read act
+logs_menu() {
+    echo "1) Xray logs"
+    echo "2) Panel logs"
+    echo "3) All logs"
+    read -p "Select: " opt
 
-        case $act in
-            1) 
-                echo -ne "${YELLOW}Фильтр (IP/UUID) или Enter: ${NC}"; read f
-                docker logs -f --tail 100 "$name" 2>&1 | grep --color=always -i "$f"
-                ;;
-            2) docker restart "$name" ;;
-            3) docker stop "$name" ;;
-            4) docker start "$name" ;;
-            5) 
-                # Пытаемся угадать путь
-                path=$CONF_XRAY
-                [[ "$name" == *"remnanode"* ]] && path=$CONF_REMNANODE
-                [[ "$name" == *"remnawave"* ]] && path=$CONF_WAVE
-                nano "$path"
-                ;;
-            0) break ;;
-        esac
-    done
+    case $opt in
+        1) docker logs -f $XRAY ;;
+        2) docker logs -f $PANEL ;;
+        3) docker logs -f $XRAY & docker logs -f $PANEL ;;
+    esac
 }
 
-# Главный цикл
+search_logs() {
+    read -p "Enter IP or UUID: " query
+    echo -e "${GREEN}Searching logs...${NC}"
+
+    docker logs $XRAY 2>&1 | grep -i "$query"
+    docker logs $PANEL 2>&1 | grep -i "$query"
+}
+
+container_control() {
+    echo "1) Start"
+    echo "2) Stop"
+    echo "3) Restart"
+    read -p "Action: " act
+
+    read -p "Container name: " cname
+
+    case $act in
+        1) docker start $cname ;;
+        2) docker stop $cname ;;
+        3) docker restart $cname ;;
+    esac
+}
+
+edit_configs() {
+    echo -e "${YELLOW}Searching config files...${NC}"
+
+    FILE=$(find / -type f \( -name "*.json" -o -name "*.yml" \) 2>/dev/null | grep -Ei 'xray|remna|config' | head -n 10)
+
+    echo "$FILE"
+    echo "Enter full path:"
+    read path
+
+    $EDITOR "$path"
+}
+
+user_trace() {
+    read -p "Enter UUID or IP: " user
+
+    echo -e "${GREEN}=== XRAY ===${NC}"
+    docker logs $XRAY 2>&1 | grep "$user"
+
+    echo -e "${GREEN}=== PANEL ===${NC}"
+    docker logs $PANEL 2>&1 | grep "$user"
+}
+
+auto_info() {
+    echo -e "${GREEN}Detected:${NC}"
+    echo "Xray: $XRAY"
+    echo "Panel: $PANEL"
+    echo "DB: $DB"
+}
+
+# ========= MAIN =========
+
+detect_containers
+
 while true; do
-    clear
-    echo -e "${CYAN}=== GotBot VPN CLI (Bash Edition) ===${NC}"
-    
-    # Получаем список в массив
-    IFS=$'\n' read -rd '' -a container_list <<< "$(get_containers)"
-    
-    if [ ${#container_list[@]} -eq 0 ]; then
-        echo -e "${RED}VPN контейнеры не найдены!${NC}"
-    else
-        for i in "${!container_list[@]}"; do
-            color=$RED
-            [[ "${container_list[$i]}" == *"Up"* ]] && color=$GREEN
-            printf "${CYAN}%2d)${NC} %s\n" "$((i+1))" "${color}${container_list[$i]}${NC}"
-        done
-    fi
+    echo ""
+    echo -e "${YELLOW}==== XRAY CLI TOOL ==== ${NC}"
+    echo "1) Containers status"
+    echo "2) Logs"
+    echo "3) Search in logs (IP/UUID)"
+    echo "4) User trace"
+    echo "5) Container control"
+    echo "6) Edit configs"
+    echo "7) Auto detected info"
+    echo "0) Exit"
 
-    echo "-------------------------------------"
-    echo -e "${YELLOW}s)${NC} Глобальный поиск по логам"
-    echo -e "${YELLOW}q)${NC} Выход"
-    echo "-------------------------------------"
-    echo -ne "${GREEN}Выберите номер: ${NC}"
-    read choice
+    read -p "Select: " choice
 
-    if [[ "$choice" == "q" ]]; then
-        exit 0
-    elif [[ "$choice" == "s" ]]; then
-        global_search
-    elif [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -le "${#container_list[@]}" ]; then
-        # Вычленяем имя из строки "name (status)"
-        c_name=$(echo "${container_list[$((choice-1))]}" | awk '{print $1}')
-        manage_container "$c_name"
-    fi
+    case $choice in
+        1) status ;;
+        2) logs_menu ;;
+        3) search_logs ;;
+        4) user_trace ;;
+        5) container_control ;;
+        6) edit_configs ;;
+        7) auto_info ;;
+        0) exit ;;
+    esac
 done
