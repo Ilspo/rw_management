@@ -8,9 +8,23 @@ NC='\033[0m' # No Color
 
 WORKDIR="/opt/remnawave"
 BACKUP_DIR="$WORKDIR/backups"
-mkdir -p "$BACKUP_DIR"
 
 echo -e "${YELLOW}=== Remnawave Management Script ===${NC}"
+
+# Проверка наличия директории
+if [ ! -d "$WORKDIR" ]; then
+    echo -e "${RED}[ERROR] Директория $WORKDIR не найдена! Убедитесь, что панель установлена.${NC}"
+    exit 1
+fi
+
+cd "$WORKDIR" || exit 1
+mkdir -p "$BACKUP_DIR"
+
+# Проверка зависимостей
+if ! command -v docker &> /dev/null; then
+    echo -e "${RED}[ERROR] Docker не установлен!${NC}"
+    exit 1
+fi
 
 # Функция для синхронизации .env
 sync_env() {
@@ -43,24 +57,38 @@ do_backup() {
     echo -e "\n${YELLOW}Что включить в бэкап?${NC}"
     echo "1) Только базу данных (.sql)"
     echo "2) Полный бэкап (БД + .env + конфиги)"
-    read -p "Выберите вариант: " b_type
+    read -p "Выберите вариант: " b_type < /dev/tty
 
     TIMESTAMP=$(date +%Y-%m-%d_%H-%M)
     
     case $b_type in
         1)
             FILE="$BACKUP_DIR/db_only_$TIMESTAMP.sql"
-            docker exec -t remnawave-db pg_dumpall -c -U postgres > "$FILE"
-            echo -e "${GREEN}[SUCCESS] Дамп базы создан: $FILE${NC}"
+            echo -e "${YELLOW}[INFO] Создание дампа БД...${NC}"
+            if docker compose exec -T db sh -c 'pg_dumpall -c -U "$POSTGRES_USER"' > "$FILE"; then
+                echo -e "${GREEN}[SUCCESS] Дамп базы создан: $FILE${NC}"
+            else
+                echo -e "${RED}[ERROR] Ошибка при создании дампа!${NC}"
+                rm -f "$FILE"
+            fi
             ;;
         2)
             FILE="$BACKUP_DIR/full_backup_$TIMESTAMP.tar.gz"
-            # Сначала делаем дамп во временный файл
-            docker exec -t remnawave-db pg_dumpall -c -U postgres > "$WORKDIR/dump_temp.sql"
-            # Пакуем всё важное
-            tar -czf "$FILE" -C "$WORKDIR" .env docker-compose.yml caddy/ dump_temp.sql
-            rm "$WORKDIR/dump_temp.sql"
-            echo -e "${GREEN}[SUCCESS] Полный архив создан: $FILE${NC}"
+            echo -e "${YELLOW}[INFO] Создание полного бэкапа...${NC}"
+            
+            # Сначала делаем дамп во временный файл с проверкой успешности
+            if docker compose exec -T db sh -c 'pg_dumpall -c -U "$POSTGRES_USER"' > "$WORKDIR/dump_temp.sql"; then
+                # Пакуем всё важное (проверяем наличие caddy перед добавлением)
+                local TAR_TARGETS=".env docker-compose.yml dump_temp.sql"
+                if [ -d "caddy" ]; then TAR_TARGETS="$TAR_TARGETS caddy/"; fi
+                
+                tar -czf "$FILE" -C "$WORKDIR" $TAR_TARGETS
+                rm -f "$WORKDIR/dump_temp.sql"
+                echo -e "${GREEN}[SUCCESS] Полный архив создан: $FILE${NC}"
+            else
+                echo -e "${RED}[ERROR] Ошибка при создании дампа БД. Бэкап прерван!${NC}"
+                rm -f "$WORKDIR/dump_temp.sql"
+            fi
             ;;
         *) echo -e "${RED}Отмена.${NC}" ;;
     esac
@@ -69,8 +97,15 @@ do_backup() {
 # --- МЕНЮ ВОССТАНОВЛЕНИЯ ---
 do_restore() {
     echo -e "\n${YELLOW}Доступные бэкапы в $BACKUP_DIR:${NC}"
+    
+    # Проверяем, есть ли файлы
+    if [ -z "$(ls -A "$BACKUP_DIR")" ]; then
+        echo -e "${RED}Нет доступных бэкапов в $BACKUP_DIR${NC}"
+        return
+    fi
+
     ls -1 "$BACKUP_DIR"
-    read -p "Введите имя файла для восстановления: " r_file
+    read -p "Введите имя файла для восстановления: " r_file < /dev/tty
     
     local filepath="$BACKUP_DIR/$r_file"
 
@@ -82,8 +117,11 @@ do_restore() {
     # Если это SQL файл (только база)
     if [[ "$r_file" == *.sql ]]; then
         echo -e "${YELLOW}[INFO] Восстановление только БД...${NC}"
-        cat "$filepath" | docker exec -i remnawave-db psql -U postgres
-        echo -e "${GREEN}[SUCCESS] База восстановлена.${NC}"
+        if docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER"' < "$filepath"; then
+            echo -e "${GREEN}[SUCCESS] База восстановлена.${NC}"
+        else
+            echo -e "${RED}[ERROR] Ошибка при восстановлении базы!${NC}"
+        fi
 
     # Если это архив (полный бэкап)
     elif [[ "$r_file" == *.tar.gz ]]; then
@@ -100,16 +138,31 @@ do_restore() {
         fi
 
         # 2. Восстановление БД
-        docker compose up -d remnawave-db
-        sleep 3 # Ждем старта базы
-        cat "$WORKDIR/temp_restore/dump_temp.sql" | docker exec -i remnawave-db psql -U postgres
+        echo -e "${YELLOW}[INFO] Перезапуск контейнера БД...${NC}"
+        docker compose up -d db
+        echo -e "${YELLOW}[INFO] Ожидание готовности базы (5 сек)...${NC}"
+        sleep 5 # Ждем старта базы
         
-        # 3. Восстановление конфигов (по желанию можно добавить Caddy)
-        # cp -r "$WORKDIR/temp_restore/caddy" "$WORKDIR/"
+        echo -e "${YELLOW}[INFO] Импорт дампа БД...${NC}"
+        if docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER"' < "$WORKDIR/temp_restore/dump_temp.sql"; then
+            echo -e "${GREEN}[SUCCESS] База успешно импортирована.${NC}"
+        else
+             echo -e "${RED}[ERROR] Ошибка при импорте БД!${NC}"
+        fi
+        
+        # 3. Восстановление конфигов Caddy (если есть)
+        if [ -d "$WORKDIR/temp_restore/caddy" ]; then
+            cp -r "$WORKDIR/temp_restore/caddy" "$WORKDIR/"
+            echo -e "${GREEN}[+] Конфиги Caddy восстановлены${NC}"
+        fi
 
         rm -rf "$WORKDIR/temp_restore"
         echo -e "${GREEN}[SUCCESS] Полное восстановление завершено.${NC}"
+        
+        echo -e "${YELLOW}[INFO] Запуск всех сервисов...${NC}"
         docker compose up -d
+    else
+        echo -e "${RED}[!] Неподдерживаемый формат файла.${NC}"
     fi
 }
 
@@ -117,11 +170,11 @@ do_restore() {
 echo "1) Сделать бэкап"
 echo "2) Восстановить из бэкапа"
 echo "3) Выход"
-read -p "Выберите действие: " action
+read -p "Выберите действие: " action < /dev/tty
 
 case $action in
     1) do_backup ;;
     2) do_restore ;;
     3) exit 0 ;;
-    *) echo "Неверный выбор" ;;
+    *) echo -e "${RED}Неверный выбор${NC}" ;;
 esac
