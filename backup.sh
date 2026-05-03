@@ -65,7 +65,7 @@ do_backup() {
         1)
             FILE="$BACKUP_DIR/db_only_$TIMESTAMP.sql"
             echo -e "${YELLOW}[INFO] Создание дампа БД...${NC}"
-            if docker compose exec -T db sh -c 'pg_dumpall -c -U "$POSTGRES_USER"' > "$FILE"; then
+            if docker compose exec -T remnawave-db sh -c 'pg_dumpall -c -U "$POSTGRES_USER"' > "$FILE"; then
                 echo -e "${GREEN}[SUCCESS] Дамп базы создан: $FILE${NC}"
             else
                 echo -e "${RED}[ERROR] Ошибка при создании дампа!${NC}"
@@ -77,7 +77,7 @@ do_backup() {
             echo -e "${YELLOW}[INFO] Создание полного бэкапа...${NC}"
             
             # Сначала делаем дамп во временный файл с проверкой успешности
-            if docker compose exec -T db sh -c 'pg_dumpall -c -U "$POSTGRES_USER"' > "$WORKDIR/dump_temp.sql"; then
+            if docker compose exec -T remnawave-db sh -c 'pg_dumpall -c -U "$POSTGRES_USER"' > "$WORKDIR/dump_temp.sql"; then
                 # Пакуем всё важное (проверяем наличие caddy перед добавлением)
                 local TAR_TARGETS=".env docker-compose.yml dump_temp.sql"
                 if [ -d "caddy" ]; then TAR_TARGETS="$TAR_TARGETS caddy/"; fi
@@ -117,7 +117,7 @@ do_restore() {
     # Если это SQL файл (только база)
     if [[ "$r_file" == *.sql ]]; then
         echo -e "${YELLOW}[INFO] Восстановление только БД...${NC}"
-        if docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER"' < "$filepath"; then
+        if docker compose exec -T remnawave-db sh -c 'psql -U "$POSTGRES_USER"' < "$filepath"; then
             echo -e "${GREEN}[SUCCESS] База восстановлена.${NC}"
         else
             echo -e "${RED}[ERROR] Ошибка при восстановлении базы!${NC}"
@@ -139,12 +139,12 @@ do_restore() {
 
         # 2. Восстановление БД
         echo -e "${YELLOW}[INFO] Перезапуск контейнера БД...${NC}"
-        docker compose up -d db
+        docker compose up -d remnawave-db
         echo -e "${YELLOW}[INFO] Ожидание готовности базы (5 сек)...${NC}"
         sleep 5 # Ждем старта базы
         
         echo -e "${YELLOW}[INFO] Импорт дампа БД...${NC}"
-        if docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER"' < "$WORKDIR/temp_restore/dump_temp.sql"; then
+        if docker compose exec -T remnawave-db sh -c 'psql -U "$POSTGRES_USER"' < "$WORKDIR/temp_restore/dump_temp.sql"; then
             echo -e "${GREEN}[SUCCESS] База успешно импортирована.${NC}"
         else
              echo -e "${RED}[ERROR] Ошибка при импорте БД!${NC}"
